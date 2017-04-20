@@ -1,0 +1,13 @@
+# IDE specific
+.idea
+.idea_module
+.DS_Store
+.ensime
+.ensime_cache/
+*.iml
+
+logs/
+.project/
+.cache
+.classpath
+.settings
