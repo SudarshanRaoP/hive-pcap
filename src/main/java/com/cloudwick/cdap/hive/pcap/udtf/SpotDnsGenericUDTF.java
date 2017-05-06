@@ -6,31 +6,29 @@ import org.apache.hadoop.hive.ql.exec.UDFArgumentException;
 import org.apache.hadoop.hive.ql.metadata.HiveException;
 import org.apache.hadoop.hive.ql.udf.generic.GenericUDTF;
 import org.apache.hadoop.hive.serde2.objectinspector.*;
-import org.apache.hadoop.hive.serde2.objectinspector.primitive.JavaBinaryObjectInspector;
-import org.apache.hadoop.hive.serde2.objectinspector.primitive.JavaLongObjectInspector;
 import org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorFactory;
-import org.slf4j.Logger;
+import org.apache.hadoop.hive.serde2.objectinspector.primitive.PrimitiveObjectInspectorUtils;
+import org.apache.log4j.Logger;
 import org.joda.time.DateTime;
+import org.joda.time.format.DateTimeFormat;
+import org.joda.time.format.DateTimeFormatter;
 import org.pcap4j.packet.EthernetPacket;
 import org.pcap4j.packet.IpV4Packet;
 import org.pcap4j.packet.UdpPacket;
 import org.pcap4j.packet.namednumber.UdpPort;
-import org.slf4j.LoggerFactory;
 import org.xbill.DNS.Message;
 import org.xbill.DNS.Record;
 import org.xbill.DNS.Section;
 
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
 
 public class SpotDnsGenericUDTF extends GenericUDTF {
 
-    private JavaLongObjectInspector longOI = PrimitiveObjectInspectorFactory.javaLongObjectInspector;
-    private JavaBinaryObjectInspector binaryOI = PrimitiveObjectInspectorFactory.javaByteArrayObjectInspector;
-    private SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd hh:mm:ss");
-
-    Logger logger = LoggerFactory.getLogger(this.getClass());
+    private PrimitiveObjectInspector longOI;
+    private PrimitiveObjectInspector binaryOI;
+    private DateTimeFormatter format = DateTimeFormat.forPattern("MMM dd yyyy HH:mm:ss.SSS 'UTC'");
+    private Logger logger = Logger.getLogger(SpotDnsGenericUDTF.class);
 
     @Override
     public StructObjectInspector initialize(StructObjectInspector argOIs) throws UDFArgumentException {
@@ -48,13 +46,15 @@ public class SpotDnsGenericUDTF extends GenericUDTF {
                 ((PrimitiveObjectInspector) inFields.get(2)
                         .getFieldObjectInspector())
                         .getPrimitiveCategory() != PrimitiveObjectInspector.PrimitiveCategory.BINARY) {
-            throw new UDFArgumentException("SpotDnsGenericUDTF() takes a long, a integer and a binary as parameters");
+            throw new UDFArgumentException("SpotDnsGenericUDTF() takes a long and a binary as parameters");
         }
 
+        longOI = (PrimitiveObjectInspector) inFields.get(0).getFieldObjectInspector();
+        binaryOI = (PrimitiveObjectInspector) inFields.get(1).getFieldObjectInspector();
         List<String> fieldNames = new ArrayList<String>(14);
         List<ObjectInspector> fieldOIs = new ArrayList<ObjectInspector>(14);
 
-        fieldNames.add("treceived");
+        fieldNames.add("frame_time");
         fieldNames.add("unix_tstamp");
         fieldNames.add("frame_len");
         fieldNames.add("ip_dst");
@@ -78,11 +78,10 @@ public class SpotDnsGenericUDTF extends GenericUDTF {
         fieldOIs.add(PrimitiveObjectInspectorFactory.javaStringObjectInspector);
         fieldOIs.add(PrimitiveObjectInspectorFactory.javaIntObjectInspector);
         fieldOIs.add(PrimitiveObjectInspectorFactory.javaStringObjectInspector);
+        fieldOIs.add(PrimitiveObjectInspectorFactory.javaIntObjectInspector);
         fieldOIs.add(PrimitiveObjectInspectorFactory.javaStringObjectInspector);
         fieldOIs.add(PrimitiveObjectInspectorFactory.javaStringObjectInspector);
         fieldOIs.add(PrimitiveObjectInspectorFactory.javaStringObjectInspector);
-        fieldOIs.add(PrimitiveObjectInspectorFactory.javaStringObjectInspector);
-        logger.debug("Initializing SpotDnsGenericUDTF");
         return ObjectInspectorFactory.getStandardStructObjectInspector(fieldNames, fieldOIs);
     }
 
@@ -96,6 +95,7 @@ public class SpotDnsGenericUDTF extends GenericUDTF {
                 message = new Message(udpPacket.getPayload().getRawData());
             }
         } catch (Exception ex) {
+            logger.error("Error while creating message : " + ex.getMessage());
             message = null;
         }
         return message;
@@ -116,14 +116,14 @@ public class SpotDnsGenericUDTF extends GenericUDTF {
         sb.append(answers);
         sb.append("]");
 
-        return new Object[]{ format.format(date), ts, len,
+        return new Object[]{format.print(date), ts, len,
                 header.getDstAddr().getHostAddress(),
                 header.getSrcAddr().getHostAddress(), question.getName().toString(),
                 question.getType(), String.valueOf(question.getDClass()), message.getRcode(),
-                sb.toString(), StringUtils.leftPad(String.valueOf(date.getYear()), 2),
-                StringUtils.leftPad(String.valueOf(date.getMonthOfYear()), 2),
-                StringUtils.leftPad(String.valueOf(date.getDayOfMonth()), 2),
-                StringUtils.leftPad(String.valueOf(date.getHourOfDay()), 2)
+                sb.toString(), date.getYear(),
+                date.getMonthOfYear(),
+                date.getDayOfMonth(),
+                date.getHourOfDay()
         };
     }
 
@@ -133,30 +133,28 @@ public class SpotDnsGenericUDTF extends GenericUDTF {
         UdpPacket udp;
         Message message;
         Object[] out;
-        long ts = longOI.get(objects[0]);
-        byte[] data = binaryOI.getPrimitiveJavaObject(objects[1]);
+        long ts = PrimitiveObjectInspectorUtils.getLong(objects[0], longOI) * 1000;
+        byte[] data = PrimitiveObjectInspectorUtils.getBinary(objects[1], binaryOI).getBytes();
         int len = data.length;
         try {
             if (len > 0) {
-                eth = EthernetPacket.newPacket(data, 0, len);
+                eth = EthernetPacket.newPacket(data, 16, data.length - 16);
                 ip4 = eth.get(IpV4Packet.class);
                 udp = eth.get(UdpPacket.class);
                 if (ip4 != null && udp != null) {
                     message = getMessage(udp);
                     if (message != null) {
-                       out = getObject(ts, len, ip4.getHeader(), message);
+                        out = getObject(ts, len, ip4.getHeader(), message);
                         forward(out);
                     }
                 }
             }
         } catch (Exception ex) {
-            logger.error("Error encountered while processing packet", ex);
+            logger.error("Error encountered while processing packet : " + ex.getMessage());
         }
 
     }
 
-
     public void close() throws HiveException {
-        logger.debug("Closed SpotDnsGenericUDTF.");
     }
 }
